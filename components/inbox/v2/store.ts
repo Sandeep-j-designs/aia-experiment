@@ -143,6 +143,26 @@ export type Item = {
     "form" | "amount" | "status" | "hardRef" | "softRef" | "error"
   >;
   extractionDelay?: number;
+  /**
+   * Set when Neo, the in-app agent, prepared this document rather than a
+   * person or an extraction. Neo only ever prepares: approval stays with the
+   * person it acted for, and `doneBy` still names them.
+   *
+   * DEV: returned by the API as `prepared_by` on the item.
+   */
+  /**
+   * Set on documents arriving during a Neo live run. Neo reports each arrival
+   * in its own log and status strip, so the Inbox's "Preparing N documents"
+   * toast stays quiet for these rather than firing once per document.
+   */
+  watchedBy?: "Neo";
+  preparedBy?: {
+    agent: "Neo";
+    runId: string;
+    onBehalfOf: string;
+    /** The document it was prepared from, when there is one. */
+    fromId?: string;
+  };
 };
 export type Event = {
   id: string;
@@ -444,6 +464,12 @@ function seed(): State {
       ...structuredClone(hard),
       id: "POSTED-2041",
       status: "Approved",
+      // DEV: payment and attachments come with the bill from GET /bills.
+      original: {
+        ...structuredClone(hard.original),
+        paymentStatus: "paid",
+        attachmentCount: 3,
+      },
       priorVoucher: true,
       hardRef: undefined,
       snapshot: structuredClone(hard.form),
@@ -526,10 +552,11 @@ const WHATSAPP_SENDERS = [
  *
  * Only the queue is rewritten. Posted records (Approved, and the prior voucher
  * the hard duplicate matches) are the books, not arrivals, and stay as seeded.
- * Documents still being read are kept first so the story always has a few
- * finishing while the welcome dialog is up; the rest are the ones ready to
- * review. Anything else in the seeded queue is dropped — a backlog of failures
- * is not what a WhatsApp user who has never opened the Inbox would find.
+ * Only documents already read make it in: AIA-Experiment has no welcome
+ * dialog for a batch to finish under, so the queue opens settled, with no
+ * "Preparing" toast on load. Anything else in the seeded queue is dropped — a
+ * backlog of failures is not what a WhatsApp user who has never opened the
+ * Inbox would find.
  */
 function withWhatsAppBacklog(base: State, company: string): State {
   const queue = base.items.filter(
@@ -537,7 +564,7 @@ function withWhatsAppBacklog(base: State, company: string): State {
   );
   const rank = (item: Item) =>
     ["Received", "Extracting"].includes(item.status)
-      ? 0
+      ? 3
       : item.status === "Duplicate"
         ? 1
         : item.status === "Needs Review"
@@ -554,16 +581,11 @@ function withWhatsAppBacklog(base: State, company: string): State {
     source: "whatsapp",
     sender: WHATSAPP_SENDERS[index % WHATSAPP_SENDERS.length],
     subject: "—",
-    // Newest first, spread over the last three days. The ones still being
-    // read are the newest: they arrived minutes ago.
+    // Newest first, spread over the last three days; the first few arrived
+    // minutes ago.
     received: new Date(
       now - (index < 4 ? (index + 1) * 4 * 60_000 : index * 3.8 * 3_600_000)
     ).toISOString(),
-    // Slow enough that the welcome dialog opens while they are still being
-    // read, and counts them down as they finish.
-    ...(["Received", "Extracting"].includes(item.status)
-      ? { extractionDelay: 9000 + index * 3500 }
-      : {}),
   }));
   const replaced = new Map(arrivals.map((item) => [item.id, item]));
   return {
@@ -703,6 +725,12 @@ export function useStore() {
   );
 }
 export const getState = () => state;
+export const subscribeStore = (listener: () => void) => {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+};
 export function event(
   name: string,
   item?: Item,
@@ -1204,7 +1232,10 @@ const timers = new Set<string>();
  * for the loader's progress. Kept beside the timers rather than on the item:
  * it is the timers' own schedule, and it resets with them on load.
  */
-const extractionTimes = new Map<string, { startedAt: number; duration: number }>();
+const extractionTimes = new Map<
+  string,
+  { startedAt: number; duration: number }
+>();
 export const extractionTiming = (id: string) => extractionTimes.get(id);
 export function scheduleExtraction(id: string) {
   if (timers.has(id)) return;
@@ -1571,6 +1602,58 @@ export function beginUploadedExtraction(
 }
 
 /**
+ * Bill Splitter's Create N bills: each confirmed bill enters as its own
+ * upload and runs the ordinary extraction into Needs Review. Nothing is
+ * approved — the PRD is explicit that the splitter never skips review.
+ *
+ * The extracted values come from a purchase template, as the demo upload's
+ * do, with the vendor and invoice number read off the bill's own pages laid
+ * over them where detection found them.
+ *
+ * DEV: POST /bill-splits/:id/bills returns the created documents.
+ */
+export function createSplitBills(
+  company: string,
+  bills: { fileName: string; vendor?: string; invoiceNo?: string }[]
+) {
+  const templates = seed().items.filter(
+    (item) =>
+      item.company === company &&
+      item.route === "AP" &&
+      seedable(item) &&
+      !item.priorVoucher &&
+      // A clean bill: each split bill should land in Needs Review on its own
+      // merits, not arrive pre-flagged as a duplicate or a failure.
+      ["Received", "Extracting", "Needs Review"].includes(item.status) &&
+      !item.hardRef &&
+      !item.softRef &&
+      !item.error
+  );
+  if (!templates.length) return [];
+  const created = bills.map((bill, index): Item => {
+    const template = structuredClone(templates[index % templates.length]);
+    return {
+      ...template,
+      id: `SPLIT-BILL-${crypto.randomUUID()}`,
+      status: "Needs Review",
+      source: "upload",
+      sender: actor,
+      route: "AP",
+      aiRoute: "AP",
+      topChoice: "AP",
+      file: { ...template.file, name: bill.fileName, ext: "pdf" },
+      form: {
+        ...template.form,
+        party: bill.vendor || template.form.party,
+        invoiceNo: bill.invoiceNo || template.form.invoiceNo,
+      },
+    };
+  });
+  beginUploadedExtraction(company, created, []);
+  return created;
+}
+
+/**
  * Put one company back to the state a fresh page load would give it.
  *
  * The guided walkthrough uploads, extracts and opens a document, and what it
@@ -1856,4 +1939,159 @@ export function applyBulkAction(
   });
   persist();
   return result;
+}
+
+/* ------------------------------------------------------------------- Neo */
+
+/**
+ * Add a document Neo prepared. It enters where any document waiting for a
+ * person does — Needs Review — because Neo prepares and never approves.
+ *
+ * DEV: POST /api/inbox/items with `prepared_by`; the backend writes the edit
+ * log entry naming the agent and the user it acted for.
+ */
+export function neoCreate(item: Item, runId: string, fromId?: string) {
+  if (!state.permissions.includes(item.route))
+    throw new Error("You do not have access to create this voucher type.");
+  if (state.items.some((x) => x.id === item.id))
+    throw new Error("This draft already exists.");
+  if (
+    fromId &&
+    !state.items.some(
+      (x) =>
+        x.id === fromId && x.company === state.company && x.status !== "Deleted"
+    )
+  )
+    throw new Error("The source is unavailable in this company.");
+  const next: Item = {
+    ...item,
+    company: state.company,
+    status: "Needs Review",
+    preparedBy: { agent: "Neo", runId, onBehalfOf: actor, fromId },
+  };
+  state = { ...state, items: [next, ...state.items] };
+  event("Neo Draft Created", next, {
+    agent: "Neo",
+    on_behalf_of: actor,
+    run_id: runId,
+    route: next.route,
+    prepared_from: fromId,
+  });
+  return next;
+}
+
+/**
+ * Undo for a Neo run: take out what it created. Only drafts go — anything
+ * someone has approved since is a posted record, and stays.
+ *
+ * DEV: DELETE /api/neo/runs/:id/changes.
+ */
+export function neoDiscard(created: Item[], runId: string) {
+  const ids = created.map((x) => x.id);
+  const removed = state.items
+    .filter(
+      (x) =>
+        x.preparedBy?.runId === runId &&
+        x.company === state.company &&
+        x.status === "Needs Review" &&
+        created.some(
+          (before) =>
+            before.id === x.id && JSON.stringify(before) === JSON.stringify(x)
+        )
+    )
+    .map((x) => x.id);
+  state = {
+    ...state,
+    items: state.items.filter((x) => !removed.includes(x.id)),
+  };
+  event("Neo Run Undone", undefined, {
+    agent: "Neo",
+    run_id: runId,
+    removed,
+  });
+  for (const item of created.filter((x) => removed.includes(x.id)))
+    neoLog("Neo Draft Removed", runId, item);
+  return {
+    reversed: removed,
+    skipped: ids.filter((id) => !removed.includes(id)),
+  };
+}
+
+/**
+ * Undo for a Neo run that edited documents: put each back as it was before
+ * the run touched it. Approved records are skipped for the same reason as
+ * above.
+ */
+export function neoRestore(snapshots: Item[], runId: string, expected: Item[]) {
+  const byId = new Map(snapshots.map((x) => [x.id, x]));
+  const restored: string[] = [];
+  state = {
+    ...state,
+    items: state.items.map((x) => {
+      const before = byId.get(x.id);
+      const after = expected.find((item) => item.id === x.id);
+      if (
+        !before ||
+        !after ||
+        x.company !== state.company ||
+        x.status === "Approved" ||
+        JSON.stringify(x) !== JSON.stringify(after)
+      )
+        return x;
+      restored.push(x.id);
+      return structuredClone(before);
+    }),
+  };
+  event("Neo Run Undone", undefined, {
+    agent: "Neo",
+    run_id: runId,
+    restored,
+  });
+  for (const item of snapshots.filter((x) => restored.includes(x.id)))
+    neoLog("Neo Draft Restored", runId, item);
+  return {
+    reversed: restored,
+    skipped: snapshots.filter((x) => !restored.includes(x.id)).map((x) => x.id),
+  };
+}
+
+/** Capture the accepted write now, so Undo cannot overwrite a later edit. */
+export function neoUndoChanges(snapshots: Item[], runId: string) {
+  snapshots = snapshots.filter((before) => {
+    const current = state.items.find((x) => x.id === before.id);
+    return (
+      current &&
+      current.company === state.company &&
+      current.status !== "Approved" &&
+      JSON.stringify(current) !== JSON.stringify(before)
+    );
+  });
+  state = {
+    ...state,
+    items: state.items.map((x) =>
+      snapshots.some((s) => s.id === x.id) && x.status !== "Approved"
+        ? { ...x, preparedBy: { agent: "Neo", runId, onBehalfOf: actor } }
+        : x
+    ),
+  };
+  const expected = structuredClone(
+    state.items.filter((x) => snapshots.some((s) => s.id === x.id))
+  );
+  for (const item of expected) neoLog("Neo Draft Changed", runId, item);
+  return () => neoRestore(snapshots, runId, expected);
+}
+
+/** Log an agent action that changed nothing in the books, e.g. a message. */
+export function neoLog(
+  name: string,
+  runId: string,
+  item?: Item,
+  properties: Record<string, unknown> = {}
+) {
+  event(name, item, {
+    agent: "Neo",
+    on_behalf_of: actor,
+    run_id: runId,
+    ...properties,
+  });
 }

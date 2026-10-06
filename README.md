@@ -231,3 +231,81 @@ prototype. Sync fails if an upstream change invalidates a patch anchor.
 Browser regression checks: `node tests/ar-predictions.test.cjs` with Playwright
 installed. `PLAYWRIGHT_MODULE` can point to an existing Playwright installation;
 `CHROME_PATH` optionally selects an installed Chrome executable.
+
+## Neo — the in-app agent
+
+A chat agent docked on the right of every screen (`Ctrl J`, or **Neo** in the
+top bar; an edge tab on the full-screen review, which has no top bar). It runs
+tasks against the same store the screens use, so everything it does shows up in
+the Inbox, the registers and the review sheet.
+
+Neo **prepares and never approves**. What it creates enters as Needs Review with
+`preparedBy` set and a **Neo** tag in the lists; approval stays a person's
+keypress and is logged under their name. Actions are tiered by risk — read,
+draft (previewed, one key, undoable from Runs), commit (the user's click is the
+approval), external (message shown verbatim, sent only on the user's say-so).
+
+Tasks it can run in this prototype:
+
+| Ask | Does |
+|---|---|
+| Create a sales invoice based on this purchase | New AR draft from an AP bill: markup, CGST+SGST vs IGST from the two GSTINs, income ledger from the customer's history |
+| What needs my attention? | Groups the queue into ready / blocked / low confidence / duplicates, with ₹ totals |
+| Why was INB-2042 flagged? | Cites routing reason, confidence, flagged fields, missing fields, duplicate match |
+| Move all Nova Logistics bills to Freight Inward | Before/after diff, then the bulk Reassign path; undoable |
+| Find duplicates | Lists them against what they matched; delete is undoable |
+| Book depreciation of ₹12,000 on office equipment | Balanced JV draft; asks month and cost centre |
+| Approve everything above 90% confidence | Forecasts the batch with blocked reasons; approves on the user's click |
+| Ask the vendor for their GSTIN | Drafts an email to the address the bill came from; simulated send, logged |
+
+| Start a live bookkeeping run | The end-to-end workflow below |
+
+Anything else gets an honest "can't do that here yet" and the list above.
+
+**Live bookkeeping run** (`config/pages/neo/tasks/live-run.ts`) — the headline
+demo, one click from Neo's empty state or `Ctrl ↵`. Six documents arrive over
+WhatsApp and email while Neo watches; the Inbox's own extraction reads each one;
+Neo checks them the way approval does, fixes a missing ledger from the vendor's
+history (draft, undoable), and holds the duplicate and the doubtful read with a
+reason. It then stops for one approval, and on "Approve & sync" drives the real
+Tally sync (in the background, so the rows' cloud icons show it) and reports
+only what Tally confirmed. Pause holds it between documents; Stop hands the rest
+back. While it runs, a status strip sits at the foot of the workspace and the
+rows it touches are marked working / done / held (`components/neo/presence.tsx`,
+styles at the end of `styles/globals.css`).
+
+**Look.** The panel sits on the top bar's navy (`bg-surface`) so the agent reads
+as its own layer; anything that is a document — a voucher, a list of bills, a
+message — is drawn as white paper on it. Tokens only, no new colours.
+
+**Scripted, by design.** The prototype is a static export with no server, so
+the planner is a keyword matcher (`config/pages/neo/tasks/index.ts`) and each
+task is a straight-line script against a `NeoTaskApi`. That API is the contract
+with the real backend: `step`, `ask`, `card`, `say` map one-to-one onto the
+events `POST /api/neo/runs` should stream.
+
+Folders to copy: `components/neo/`, `hooks/pages/neo/`, `config/pages/neo/`,
+`types/pages/neo/`, `utils/pages/neo/`. Plus the `neo*` functions and
+`preparedBy` at the end of `components/inbox/v2/store.ts`.
+
+API routes to wire (every seam is marked `// DEV:`):
+
+- `POST /api/neo/runs` — SSE stream of Neo events; replaces `pickTask(...).run`
+  in `hooks/pages/neo/use-neo-runtime.ts`.
+- `POST /api/neo/runs/:id/replies` — the user's answer to an `ask` or `card`.
+- `DELETE /api/neo/runs/:id/changes` — Undo.
+- `GET /api/customers?include=gstin,state,contact` — replaces
+  `config/pages/neo/mock-customers.ts`.
+- `GET /api/neo/suggestions` — replaces `config/pages/neo/suggestions.ts`.
+
+Files to delete on transplant: `utils/pages/neo/selection.ts` and the one
+effect in the workspace that feeds it (production reads selection from its
+store), `components/neo/actions.ts` and the workspace listener that answers it
+(production's sync is a store action), the row-marking effect in
+`components/neo/presence.tsx`, and `config/pages/neo/tasks/` once the model is
+behind the API.
+
+Known gap, not Neo's: the sales sheet (`public/ar/sheet.js`) keeps its own
+master book, which does not contain the Inbox's customers or income ledgers —
+so a Neo-raised invoice, like every seeded sales invoice, opens with "not in
+your masters yet". Fixing it means aligning the two books upstream.

@@ -71,6 +71,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import SidebarLayout from "@/components/sidebar-layout";
+import PreparedTag from "@/components/neo/common/prepared-tag";
+import { NEO_ACTION_EVENT, reportSync } from "@/components/neo/actions";
+import { setNeoSelection } from "@/utils/pages/neo/selection";
 // Aliased: `Sheet` in this file already means the AP spreadsheet component.
 import {
   Sheet as Drawer,
@@ -105,7 +108,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { ColumnFilter, FilterPanel } from "./filter-panel";
+import { ColumnFilter, FilterPanel, QuickFilter } from "./filter-panel";
 import { format, parseISO } from "date-fns";
 import FilterChip from "@/components/common/filter-chip";
 import DateFilter from "@/components/common/date-filter";
@@ -129,12 +132,14 @@ import Sheet from "./sheet";
 import InvoiceSheet from "./invoice-sheet";
 import { ExtractionLoader, RouteSwitchLoader } from "./document-loader";
 import {
+  AmountText,
   CountPill,
   DateField,
   EditedMark,
   Field,
   FieldCard,
   Notice,
+  PageButton,
   PageDialog,
   Pill,
   Req,
@@ -192,6 +197,7 @@ import { RunRowList } from "./progress-run";
 import UploadAnimation from "./upload-animation";
 import uploadStyles from "./upload-dialog.module.css";
 import Register, { type RegisterSyncState } from "./register";
+import BillRegister from "./bill-register";
 import SyncResultModal from "./sync/sync-result-modal";
 import SyncCloud from "./sync/sync-cloud";
 import SyncChromeButton from "./sync/sync-chrome-button";
@@ -200,21 +206,13 @@ import {
   useGridKeyboard,
 } from "@/hooks/pages/inbox/use-grid-keyboard";
 import KeyboardShortcuts from "./keyboard-shortcuts";
+/** The first-visit welcome dialog. Off in AIA-Experiment; flip to bring it back. */
+const INBOX_WELCOME = false;
 const money = (n: number) =>
   new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(
     n
   );
 /** "24 Sep 2026, 2:33 am" — the Bloocks date, with the time it arrived. */
-/** The Bloocks AmountCell's figure: rupees in en-IN groups, paise small and muted. */
-const AmountText = ({ value }: { value: number }) => {
-  const [rupees, paise] = Math.abs(value).toFixed(2).split(".");
-  return (
-    <>
-      {value < 0 && "−"}₹{new Intl.NumberFormat("en-IN").format(Number(rupees))}
-      <span className="text-caption-1 text-secondary-foreground">.{paise}</span>
-    </>
-  );
-};
 const stamp = (s: string) => format(new Date(s), "d MMM yyyy, h:mm aaa");
 /**
  * The upload cap, named rather than inlined: the modal states it, the list
@@ -646,52 +644,6 @@ const REQUIRED_FIELDS = new Set([
 ]);
 /** A horizontal band of controls. */
 const band = "flex flex-wrap items-center gap-2";
-/**
- * One column's filter, promoted onto the bar (Figma 716:15029).
- *
- * The trigger is a Bloocks FilterChip, the same as the Received date chip
- * beside it. The body is `ColumnFilter` — the same searchable multi-select the
- * column-header funnel opens — rather than a second list written to look like
- * it, so "Source" means one thing wherever it is answered.
- *
- * The chip says what is applied because it is the only place an applied quick
- * filter shows: a dropdown that silently filters the grid is worse than a wide
- * one.
- */
-const QuickFilter = ({
-  label,
-  options,
-  selected,
-  onChange,
-}: {
-  label: string;
-  options: FilterOption[];
-  selected: string[];
-  onChange: (next: string[]) => void;
-}) => (
-  <Popover>
-    <PopoverTrigger asChild>
-      {/* A Bloocks FilterChip: it names what is applied ("Source:
-          WhatsApp", or a count for several) and its × clears in place. */}
-      <FilterChip
-        label={label}
-        selectionType="multiple"
-        value={selected.map(
-          (value) => options.find((o) => o.value === value)?.label ?? value
-        )}
-        onClearButtonClick={() => onChange([])}
-      />
-    </PopoverTrigger>
-    <PopoverContent align="start" className="w-auto p-0">
-      <ColumnFilter
-        label={label}
-        options={options}
-        selected={selected}
-        onChange={onChange}
-      />
-    </PopoverContent>
-  </Popover>
-);
 /**
  * `issue()`'s validator labels, as sentences for the Approve tooltip.
  *
@@ -1392,8 +1344,11 @@ export default function Workspace() {
     which (see `arrivals`). Not over a register or a document: those are
     reached from the Inbox, and a first visit that lands on one directly is
     welcomed when it comes back to the queue.
+
+    Switched off in this prototype (INBOX_WELCOME): every company counts as
+    already welcomed, so the dialog never opens and nothing waits on it.
   */
-  const welcomed = !!state.welcomed?.includes(state.company);
+  const welcomed = !INBOX_WELCOME || !!state.welcomed?.includes(state.company);
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   useEffect(() => {
     if (ready && !welcomed && !moduleRoute && !id) setWelcomeOpen(true);
@@ -1409,8 +1364,8 @@ export default function Workspace() {
     open, or about to open, the toast waits; when it closes it fires only if
     documents are still being read, and not at all once they are all ready.
   */
-  const preparing = all.filter((x) =>
-    ["Received", "Extracting"].includes(x.status)
+  const preparing = all.filter(
+    (x) => ["Received", "Extracting"].includes(x.status) && !x.watchedBy
   ).length;
   const welcomePending = welcomeOpen || (!welcomed && !moduleRoute && !id);
   const preparingBefore = useRef(0);
@@ -1465,6 +1420,36 @@ export default function Workspace() {
    * screen, and its Current Module is not a guess.
    */
   const sync = useTallySync({ items: all, route: moduleRoute ?? null });
+  /*
+    Neo can start a sync from its live run. It runs in the background, so the
+    rows' cloud icons show it going, and the outcome goes back to Neo when the
+    run lands. DEV: delete with components/neo/actions.ts.
+  */
+  const neoSync = useRef(false);
+  useEffect(() => {
+    const onNeo = (e: Event) => {
+      if ((e as CustomEvent).detail?.action !== "sync") return;
+      if (!sync.hasSyncable || sync.isRunning) {
+        reportSync({ pushed: 0, failed: 0, total: 0, outcome: "nothing" });
+        return;
+      }
+      neoSync.current = true;
+      sync.start();
+      sync.continueInBackground();
+    };
+    window.addEventListener(NEO_ACTION_EVENT, onNeo);
+    return () => window.removeEventListener(NEO_ACTION_EVENT, onNeo);
+  });
+  useEffect(() => {
+    if (!neoSync.current || !sync.run) return;
+    neoSync.current = false;
+    reportSync({
+      pushed: sync.run.pushed,
+      failed: sync.run.failed,
+      total: sync.run.total,
+      outcome: sync.run.outcome,
+    });
+  }, [sync.run]);
   const searchInput = useRef<HTMLInputElement | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const filtered = useMemo(
@@ -1615,6 +1600,27 @@ export default function Workspace() {
     setPage(0);
     setSelected([]);
   };
+  // Neo reads "these" as the ticked rows. DEV: delete with utils/pages/neo/selection.
+  useEffect(() => setNeoSelection(selected), [selected]);
+  useEffect(() => () => setNeoSelection([]), []);
+  useEffect(() => {
+    const requested = router.query.neoReview;
+    if (!ready || typeof requested !== "string") return;
+    const ids = requested.split(",");
+    const eligible = getState()
+      .items.filter(
+        (x) =>
+          x.company === getState().company &&
+          x.status === "Needs Review" &&
+          ids.includes(x.id)
+      )
+      .map((x) => x.id);
+    setFilters(defaultFilters);
+    setTab("Need review");
+    setPage(0);
+    setSelected(eligible);
+    void router.replace("/inbox", undefined, { shallow: true });
+  }, [ready, router.query.neoReview]);
   const open = (x: Item) => {
     configure({ queue: filtered.map((x) => x.id) });
     event("Inbox Item Viewed", x, {
@@ -1796,18 +1802,17 @@ export default function Workspace() {
     more. Until it lands the form isn't the new voucher yet, so nothing on it
     can be approved.
   */
-  const switching =
-    !!item?.routeSwitch && item.routeSwitch.until > Date.now();
+  const switching = !!item?.routeSwitch && item.routeSwitch.until > Date.now();
   const blockReason =
     !item || !reviewable
       ? ""
       : switching
         ? `Still preparing this as a ${ROUTE_LABELS[item.route]}. Approve once it’s ready.`
         : !state.permissions.includes(item.route)
-        ? `Your role can’t post to ${routeNames[item.route]}. Change the route above, or ask an administrator for access.`
-        : matched
-          ? `Same invoice number as ${matched.form.voucherNo} for ${item.form.party}. Change the vendor or the invoice number to approve.`
-          : "";
+          ? `Your role can’t post to ${routeNames[item.route]}. Change the route above, or ask an administrator for access.`
+          : matched
+            ? `Same invoice number as ${matched.form.voucherNo} for ${item.form.party}. Change the vendor or the invoice number to approve.`
+            : "";
   const deleteItem = () =>
     item &&
     askDelete(`“${item.file.name}”`, () => {
@@ -2184,6 +2189,16 @@ export default function Workspace() {
    * DEV: prototype-only. Production uploads the files it is given.
    */
   const intakeMode = useRef<"bulk" | "single" | "auto">("auto");
+  /** Upload Documents above the Inbox table, and Upload Bills on Purchases. */
+  const openSingleUpload = () => {
+    intakeMode.current = "single";
+    setSource("upload");
+    setSender(actor);
+    setUploadErrors([]);
+    setFiles([]);
+    setUploadStatus([]);
+    setDialog("upload");
+  };
   const upload = async (
     selectedFiles: File[],
     intakeSource: Item["source"],
@@ -3204,68 +3219,122 @@ export default function Workspace() {
               records, not the document queue with a filter on it — see
               ./register. The Inbox's table stays behind for the Inbox.
             */
-            <Register
-              /*
+            moduleRoute === "AP" ? (
+              <BillRegister
+                items={moduleItems}
+                selected={selected}
+                onSelectedChange={setSelected}
+                onOpen={(x) => {
+                  configure({ queue: moduleItems.map((row) => row.id) });
+                  void router.push(
+                    detailHref(
+                      x.id,
+                      x.status === "Approved" ? "voucher=1" : undefined
+                    )
+                  );
+                }}
+                onDelete={(x) =>
+                  askDelete(`“${x.form.voucherNo || x.file.name}”`, () => {
+                    remove(x.id);
+                    notify(`Deleted ${x.form.voucherNo || x.file.name}.`);
+                  })
+                }
+                onUnbuilt={(what) =>
+                  notify(
+                    `${what} is part of the app, but not this prototype.`,
+                    "info"
+                  )
+                }
+                search={filters.search}
+                onSearchChange={(value) => setFilter("search", value)}
+                filters={{
+                  party: registerParty,
+                  from: filters.from,
+                  to: filters.to,
+                  min: filters.min,
+                  max: filters.max,
+                }}
+                onFilterChange={(key, value) =>
+                  key === "party"
+                    ? setRegisterParty(value)
+                    : setFilter(key, value)
+                }
+                pageSize={pageSize}
+                onPageSizeChange={setPageSize}
+                pageSizes={PAGE_SIZES}
+                onResetFilters={() => {
+                  setFilters(defaultFilters);
+                  setRegisterParty("");
+                }}
+                onUpload={openSingleUpload}
+                onOpenShortcuts={() => setShortcutsOpen(true)}
+                searchRef={searchInput}
+                company={state.company}
+              />
+            ) : (
+              <Register
+                /*
                 Keyed by route: the three registers are the same element in the
                 tree, so without this the tab and page you left Purchases on
                 came with you to Sales — and "Needs Review" is not even one of
                 the tabs Sales has.
               */
-              key={moduleRoute}
-              route={moduleRoute}
-              items={moduleItems}
-              syncState={registerSyncState}
-              selected={selected}
-              onSelectedChange={setSelected}
-              onOpen={(x) => {
-                configure({ queue: moduleItems.map((row) => row.id) });
-                void router.push(
-                  detailHref(
-                    x.id,
-                    x.status === "Approved" ? "voucher=1" : undefined
+                key={moduleRoute}
+                route={moduleRoute}
+                items={moduleItems}
+                syncState={registerSyncState}
+                selected={selected}
+                onSelectedChange={setSelected}
+                onOpen={(x) => {
+                  configure({ queue: moduleItems.map((row) => row.id) });
+                  void router.push(
+                    detailHref(
+                      x.id,
+                      x.status === "Approved" ? "voucher=1" : undefined
+                    )
+                  );
+                }}
+                onDelete={(x) =>
+                  askDelete(`“${x.form.voucherNo || x.file.name}”`, () => {
+                    remove(x.id);
+                    notify(`Deleted ${x.form.voucherNo || x.file.name}.`);
+                  })
+                }
+                onUnbuilt={(what) =>
+                  notify(
+                    `${what} is part of the app, but not this prototype.`,
+                    "info"
                   )
-                );
-              }}
-              onDelete={(x) =>
-                askDelete(`“${x.form.voucherNo || x.file.name}”`, () => {
-                  remove(x.id);
-                  notify(`Deleted ${x.form.voucherNo || x.file.name}.`);
-                })
-              }
-              onUnbuilt={(what) =>
-                notify(
-                  `${what} is part of the app, but not this prototype.`,
-                  "info"
-                )
-              }
-              search={filters.search}
-              onSearchChange={(value) => setFilter("search", value)}
-              /*
+                }
+                search={filters.search}
+                onSearchChange={(value) => setFilter("search", value)}
+                /*
                 The register's filters ride on the workspace's own filter
                 state, so leaving a module and coming back finds the register
                 as you left it — and Reset Filters is the one control that
                 clears both screens' idea of "filtered".
               */
-              filters={{
-                party: registerParty,
-                from: filters.from,
-                to: filters.to,
-                min: filters.min,
-                max: filters.max,
-              }}
-              onFilterChange={(key, value) =>
-                key === "party"
-                  ? setRegisterParty(value)
-                  : setFilter(key, value)
-              }
-              onResetFilters={() => {
-                setFilters(defaultFilters);
-                setRegisterParty("");
-              }}
-              pageSize={pageSize}
-              onPageSizeChange={setPageSize}
-              pageSizes={PAGE_SIZES}
-            />
+                filters={{
+                  party: registerParty,
+                  from: filters.from,
+                  to: filters.to,
+                  min: filters.min,
+                  max: filters.max,
+                }}
+                onFilterChange={(key, value) =>
+                  key === "party"
+                    ? setRegisterParty(value)
+                    : setFilter(key, value)
+                }
+                onResetFilters={() => {
+                  setFilters(defaultFilters);
+                  setRegisterParty("");
+                }}
+                pageSize={pageSize}
+                onPageSizeChange={setPageSize}
+                pageSizes={PAGE_SIZES}
+              />
+            )
           ) : (
             <>
               {/* Controls stay outside the table's two-axis scroll area. */}
@@ -3341,15 +3410,7 @@ export default function Workspace() {
                               },
                             ]
                       }
-                      onPrimaryButtonClick={() => {
-                        intakeMode.current = "single";
-                        setSource("upload");
-                        setSender(actor);
-                        setUploadErrors([]);
-                        setFiles([]);
-                        setUploadStatus([]);
-                        setDialog("upload");
-                      }}
+                      onPrimaryButtonClick={openSingleUpload}
                     />
                     {!moduleRoute && (
                       <Tabs
@@ -4096,6 +4157,7 @@ export default function Workspace() {
                         {pageRows.map((x, rowIndex) => (
                           <TableRow
                             key={x.id}
+                            data-item-id={x.id}
                             role="row"
                             // The guide points at the first row it finds; the
                             // step is about what a row is, not about this one.
@@ -4189,6 +4251,7 @@ export default function Workspace() {
                                           >
                                             {x.file.name}
                                           </strong>
+                                          {x.preparedBy && <PreparedTag />}
                                           {/* Whether Tally has this one yet. */}
                                           {sync.inFlightIds.has(x.id) ? (
                                             <SyncCloud state="syncing" />
@@ -6061,36 +6124,6 @@ const BULK_FIELDS: BulkField[] = [
   "Voucher Type",
   "Ledger",
 ];
-
-const PageButton = ({
-  label,
-  disabled,
-  onClick,
-  children,
-  className,
-}: {
-  label: string;
-  disabled: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-  /** For the cohort pager, which wants the brand at low emphasis, not grey. */
-  className?: string;
-}) => (
-  <Button
-    variant="ghost"
-    size="icon"
-    aria-label={label}
-    title={label}
-    className={cn(
-      "text-secondary-foreground hover:bg-section hover:text-primary",
-      className
-    )}
-    disabled={disabled}
-    onClick={onClick}
-  >
-    {children}
-  </Button>
-);
 
 /**
  * Publishes its own height as --inbox-footer-h.

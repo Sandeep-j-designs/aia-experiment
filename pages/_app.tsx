@@ -3,6 +3,10 @@ import type { AppProps } from "next/app";
 import localFont from "next/font/local";
 import { Toaster } from "@/components/ui/sonner";
 import GuideProvider from "@/components/guide/guide-provider";
+import NeoProvider from "@/components/neo/provider";
+import NeoShell from "@/components/neo/shell";
+import NeoPanel from "@/components/neo";
+import NeoPresence from "@/components/neo/presence";
 
 const open_sans = localFont({
   src: "../public/fonts/open-sans-latin.woff2",
@@ -34,7 +38,15 @@ export default function App({ Component, pageProps }: AppProps) {
       {/* GuideProvider is mounted in production's _app.tsx too — a journey
           outlives the route it starts on, so it cannot live inside one. */}
       <GuideProvider>
-        <Component {...pageProps} />
+        {/* Neo sits above the routes for the same reason: a run started on
+            the queue has to survive opening the document it made. */}
+        <NeoProvider>
+          <NeoShell>
+            <Component {...pageProps} />
+          </NeoShell>
+          <NeoPanel />
+          <NeoPresence />
+        </NeoProvider>
       </GuideProvider>
       <Toaster position="bottom-right" closeButton />
     </div>

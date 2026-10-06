@@ -46,6 +46,7 @@ import { format, parseISO } from "date-fns";
 import FilterChip from "@/components/common/filter-chip";
 import DateFilter from "@/components/common/date-filter";
 import { T } from "./ui";
+import PreparedTag from "@/components/neo/common/prepared-tag";
 import { actor, routeNames, type Item, type Route } from "./store";
 
 /**
@@ -278,7 +279,7 @@ const REGISTER_COPY: Record<
 };
 
 /** Posted is the register's subject; the other tabs are work on its way in. */
-const tabRows = (tab: string, items: Item[]) =>
+export const tabRows = (tab: string, items: Item[]) =>
   tab === "review"
     ? items.filter((x) => !["Approved", "Deleted"].includes(x.status))
     : tab === "uploads"
@@ -376,6 +377,7 @@ const Register = ({
     cell: (item) => (
       <span className="inline-flex min-w-0 items-center gap-2">
         <span className="truncate">{item.form.voucherNo || "—"}</span>
+        {item.preparedBy && <PreparedTag />}
         <Pencil
           className="h-3.5 w-3.5 flex-none text-secondary-foreground"
           aria-hidden
@@ -666,6 +668,7 @@ const Register = ({
             {pageRows.map((item) => (
               <TableRow
                 key={item.id}
+                data-item-id={item.id}
                 className="cursor-pointer"
                 onClick={() => onOpen(item)}
               >

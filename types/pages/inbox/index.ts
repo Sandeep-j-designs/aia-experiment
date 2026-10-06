@@ -242,6 +242,9 @@ export type InboxLineage = {
 
 /* --------------------------------------------------------------- Item */
 
+/** Where payment against a posted bill stands. */
+export type InboxPaymentStatus = "unpaid" | "partiallyPaid" | "paid";
+
 export type InboxItem = {
   id: string;
   file: InboxFile;
@@ -277,6 +280,17 @@ export type InboxItem = {
   /** ISO 8601. */
   deletedAt?: string;
   lineage?: InboxLineage;
+
+  /**
+   * Bills only, once posted. Absent reads as unpaid — a bill that has just
+   * been posted has had nothing paid against it.
+   */
+  paymentStatus?: InboxPaymentStatus;
+  /**
+   * Files on the voucher, the source document included. Absent reads as 1:
+   * the document it was made from.
+   */
+  attachmentCount?: number;
 
   /**
    * The conversion the UI should offer on this item — a Bill that should have

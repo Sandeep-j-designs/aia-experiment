@@ -27,6 +27,7 @@ import { cn } from "@/lib/utils";
  * took out the AP and AR sheets — see lib/base-path.
  */
 import { basePath } from "@/lib/base-path";
+import NeoLauncher from "@/components/neo/common/launcher";
 
 /** Bloocks TopNav styling with the prototype's company and sync actions. */
 
@@ -194,6 +195,8 @@ const AppTopBar = ({
           aria-hidden="true"
           className="h-5 w-px flex-none bg-surface-stroke"
         />
+
+        <NeoLauncher />
 
         <button
           type="button"

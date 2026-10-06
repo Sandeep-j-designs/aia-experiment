@@ -503,6 +503,42 @@ html {
   background-color: hsl(var(--background));
 }
 
+/* Neo's panel is docked over the right edge. Toasts anchored there move
+   in beside it, so a notification never sits on top of the composer.
+   24rem is the panel's width (w-96). */
+html[data-neo-open] [data-sonner-toaster][data-x-position="right"] {
+  right: calc(24rem + var(--offset-right, 24px)) !important;
+}
+
+/* Neo's marks on list rows while a run works through them. The first cell
+   carries the state as a bar (the row's identity column), and a row being
+   worked on is tinted — sticky cells paint their own ground, so the tint has
+   to reach every cell. The state is also in the Neo panel's log as text;
+   colour here is never the only signal. */
+[data-item-id][data-neo] > td {
+  transition: background-color 0.4s ease;
+}
+[data-item-id][data-neo="working"] > td {
+  background-color: hsl(var(--accent)) !important;
+}
+[data-item-id][data-neo] > td:first-child {
+  box-shadow: inset 3px 0 0 var(--neo-mark);
+}
+[data-item-id][data-neo="working"] {
+  --neo-mark: hsl(var(--primary));
+}
+[data-item-id][data-neo="done"] {
+  --neo-mark: hsl(var(--green-foreground));
+}
+[data-item-id][data-neo="held"] {
+  --neo-mark: hsl(var(--warning-foreground));
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-item-id][data-neo] > td {
+    transition: none;
+  }
+}
+
 /* ── PROPOSED TOKENS ────────────────────────────────────────────────────────
    Values this prototype needs that production does not have yet. Each one is
    a design-system change that has to land in production before the screen
